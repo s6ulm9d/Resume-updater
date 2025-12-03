@@ -113,7 +113,18 @@ Use the input data now and return the JSON then the markdown_resume.`
 
             // 1. Smart Summary Generator
             const primaryLang = detected_languages?.[0] || 'Web';
-            const fallbackSummary = `Results-driven Software Engineer specialized in ${primaryLang} and modern development ecosystems. Proven track record of building scalable applications, from responsive frontends to robust backend utilities. Dedicated to writing clean, maintainable code and contributing to open-source software.`
+            const allLangs = detected_languages?.slice(0, 3).join(', ') || primaryLang;
+            const role = target_role || "Software Engineer";
+            const projectCount = top_repos?.length || 0;
+            const topProjectNames = top_repos?.slice(0, 2).map((r: any) => r.name).join(' and ');
+
+            let fallbackSummary = `Results-driven ${role} specialized in ${allLangs}. `;
+            if (projectCount > 0) {
+                fallbackSummary += `Demonstrated experience building ${projectCount} projects including ${topProjectNames}. `;
+            } else {
+                fallbackSummary += `Proven track record of building scalable applications. `;
+            }
+            fallbackSummary += `Dedicated to writing clean, maintainable code and contributing to open-source software.`;
 
             // 2. Smart Skill Descriptions
             const skillDescriptions: Record<string, string> = {
@@ -136,31 +147,22 @@ Use the input data now and return the JSON then the markdown_resume.`
             // 3. Smart Project Bullets based on keywords
             const fallbackProjects = (top_repos || []).slice(0, 5).map((repo: any) => {
                 const name = repo.name.toLowerCase();
-                let bullets = [
-                    `Engineered core features for ${repo.name}, ensuring high performance and reliability.`,
-                    "Refactored legacy code modules to improve maintainability and reduce technical debt."
-                ];
+                const techStack = repo.tech?.join(', ') || 'modern technologies';
+
+                let bullets = [];
+
+                if (repo.short_desc) {
+                    bullets.push(`Developed ${repo.name}, a ${repo.short_desc}.`);
+                } else {
+                    bullets.push(`Engineered core features for ${repo.name}, ensuring high performance and reliability.`);
+                }
+
+                bullets.push(`Leveraged ${techStack} to build a scalable and maintainable solution.`);
 
                 if (name.includes('portfolio') || name.includes('site') || name.includes('web')) {
-                    bullets = [
-                        "Designed and developed a responsive, semantic web application focused on user experience.",
-                        "Optimized asset loading and rendering performance, achieving high Lighthouse scores."
-                    ];
-                } else if (name.includes('manager') || name.includes('task') || name.includes('todo')) {
-                    bullets = [
-                        "Implemented full CRUD functionality and local state persistence for seamless user data management.",
-                        "Designed a clean, intuitive UI for efficient task tracking and workflow organization."
-                    ];
-                } else if (name.includes('print') || name.includes('util') || name.includes('tool')) {
-                    bullets = [
-                        "Developed a robust utility tool to automate complex workflows and increase developer productivity.",
-                        "Implemented comprehensive error handling and logging to ensure system stability."
-                    ];
+                    bullets[1] = "Optimized asset loading and rendering performance, achieving high Lighthouse scores.";
                 } else if (name.includes('api') || name.includes('server') || name.includes('backend')) {
-                    bullets = [
-                        "Architected scalable API endpoints with secure authentication and efficient data retrieval.",
-                        "Optimized database queries and schema design to handle increasing data loads."
-                    ];
+                    bullets[1] = "Architected scalable API endpoints with secure authentication and efficient data retrieval.";
                 }
 
                 return {
