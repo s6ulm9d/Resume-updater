@@ -6,211 +6,258 @@ const openai = new OpenAI({
 })
 
 export async function POST(req: Request) {
-    let name = "";
-    let contact: any = {};
-    let existing_resume_text = "";
-    let detected_languages: string[] = [];
-    let top_repos: any[] = [];
-    let repo_count = 0;
-    let target_role = "";
-    let tone = "";
+    let name = ""
+    let contact: any = {}
+    let existing_resume_text = ""
+    let detected_languages: string[] = []
+    let top_repos: any[] = []
+    let repo_count = 0
+    let target_role = ""
+    let tone = ""
 
     try {
         if (!process.env.OPENAI_API_KEY) {
             throw new Error("OPENAI_API_KEY is not defined in environment variables")
         }
 
-        const body = await req.json();
-        ({
+        const body = await req.json()
+            ; ({
+                name = "",
+                contact = {},
+                existing_resume_text = "",
+                detected_languages =[],
+                top_repos =[],
+                repo_count = 0,
+                target_role = "",
+                tone = ""
+            } = body)
+
+        // DEBUG - ensure inputs are present
+        console.debug("[resume.generate] inputs:", {
             name,
             contact,
-            existing_resume_text,
+            existing_resume_length: existing_resume_text?.length ?? 0,
             detected_languages,
-            top_repos,
+            top_repos_count: Array.isArray(top_repos) ? top_repos.length : typeof top_repos,
             repo_count,
             target_role,
             tone
-        } = body);
+        })
 
         // Basic validation
-        if (!top_repos || !Array.isArray(top_repos)) {
-            return NextResponse.json({ error: "Invalid payload: top_repos is required" }, { status: 400 })
+        if (!Array.isArray(top_repos)) {
+            return NextResponse.json({ error: "Invalid payload: top_repos must be array" }, { status: 400 })
         }
 
-        // Construct the prompt
-        const systemMessage = `You are a professional resume writer for software developers. Produce concise, specific, achievement-focused resumes. Avoid generic filler and repeated sentences like "used in multiple projects for development." When referencing repositories, pull exact repo names and concrete signals (commits, README lines, package.json tech). If a numeric metric is not provided, use qualitative language like "small CLI tool", "single-page portfolio", or "library used in several projects." Return two outputs in one response: json_output (strict schema) and markdown_resume. Do not invent facts; if something is not present, say so using non-numeric phrasing.`
+        // Build GitHub summary object for prompt
+        const githubData = {
+            languages: detected_languages,
+            top_repos,
+            total_repos: repo_count,
+            target_role
+        }
 
-        const userMessage = `Candidate data:
+        const systemMessage = `You are an AI resume generator.
+You will receive two inputs:
+1. Extracted Resume Data (raw text exactly as parsed from the PDF/Doc)
+2. GitHub Project Data (latest repos, languages, descriptions, stars, and pinned repos)
 
-name: "${name || ''}"
-contact: ${JSON.stringify(contact || {})}
-existing_resume_text: "${(existing_resume_text || '').substring(0, 8000).replace(/[\n\r]+/g, ' ')}"
-top_repos: ${JSON.stringify(top_repos)}
-detected_languages: ${JSON.stringify(detected_languages || [])}
-target_role: "${target_role || ''}"
-tone: "${tone || 'humanized, concise, mid-senior'}"
+Your job is to rewrite the resume using ONLY this provided data.
+Never invent achievements, skills, or details that are not present in the inputs.
 
-Task: Generate a 1-page ATS-friendly resume (Markdown) that requires minimal edits by the user. Follow these strict rules:
+TASKS:
+- Generate a professional summary strictly based on the user’s real experience, roles, skills, and GitHub activity.
+- Extract and rewrite skills using only what appears in the resume OR GitHub.
+- Rewrite experience using the real job titles, dates, tools, and tasks.
+- Rewrite projects using the real GitHub data.
+- If any field is missing, leave it out. DO NOT hallucinate.
 
-Executive summary: exactly 2 sentences. First names the candidate (if provided) and their primary focus (frontend / backend / full-stack / mobile). Second mentions one concrete achievement or the strongest skill. No generic phrases.
-
-Skills: Produce up to 8 skills. For each skill produce a single short descriptor (8–16 words) that references a repo name or a tech usage example. Example: TypeScript — Built typed frontend components and reusable utilities in portfolio and frontend.
-
-Projects: include top 5 repos (rank by stars, then commits). For each repo create two targeted bullets:
-Bullet A: purpose + one concrete feature (use README or package.json to extract features).
-Bullet B: result/what it demonstrates (architecture, test coverage, CI, user-facing outcome). Use qualitative language (e.g., "improved dev feedback loop", "modular architecture for reuse").
-
-Avoid repeated boilerplate sentences across projects and skills. Vary phrasing and use active verbs.
-
-If repo readme or package.json contains keywords like "React", "Express", "Android", mention them explicitly.
-
-Output schema (JSON) must be exactly:
-
+OUTPUT FORMAT (strict JSON):
 {
- "name": string,
- "contact": { "email": string, "location": string },
- "executive_summary": string,
- "skills": [{"skill":string,"description":string}],
- "projects": [{"name":string,"short_desc":string,"tech":[string],"bullets":[string],"url":string}],
- "notes": string
+  "name": "Candidate Name",
+  "contact": { "email": "...", "location": "..." },
+  "summary": "Professional summary...",
+  "skills": [ { "skill": "Skill Name", "description": "Brief context from data" } ],
+  "experience": [ { "role": "...", "company": "...", "dates": "...", "bullets": ["..."] } ],
+  "projects": [ { "name": "...", "short_desc": "...", "tech": ["..."], "bullets": ["..."], "url": "..." } ],
+  "education": [ { "degree": "...", "school": "...", "year": "..." } ]
 }
+`
 
-After the JSON, include markdown_resume string that is properly formatted for direct display and PDF conversion. Keep it to ~1 page.
+        const userMessage = `INPUTS:
+Resume Data:
+${(existing_resume_text || "").substring(0, 15000)}
 
-If information is missing (e.g., no README snippet), write a single short fallback bullet using available signals (commits, language).
+GitHub Data:
+${JSON.stringify(githubData, null, 2)}
 
-Use the input data now and return the JSON then the markdown_resume.`
+Tone: ${tone || "neutral"}
+Target role: ${target_role || ""}
+`
 
+        // Call OpenAI
         const completion = await openai.chat.completions.create({
+            model: "gpt-4o",
             messages: [
                 { role: "system", content: systemMessage },
                 { role: "user", content: userMessage }
             ],
-            model: "gpt-4o",
-            temperature: 0.6,
+            temperature: 0.2,
+            // request a JSON object format - the SDK may already return string, be defensive below
             response_format: { type: "json_object" },
+            max_tokens: 2000
         })
 
-        const content = completion.choices[0].message.content
-        if (!content) throw new Error("No content received from OpenAI")
+        // The SDK may return content as an object or string. Handle both safely.
+        const rawContent = completion?.choices?.[0]?.message?.content
+        if (!rawContent) throw new Error("No content received from OpenAI")
 
-        const result = JSON.parse(content)
+        // content may already be an object (when response_format used) or a JSON string
+        let parsed: any = null
+        if (typeof rawContent === "object") {
+            parsed = rawContent
+        } else if (typeof rawContent === "string") {
+            try {
+                parsed = JSON.parse(rawContent)
+            } catch (e) {
+                // Some models return JSON inside markdown; try to extract the JSON block
+                const jsonMatch = rawContent.match(/\{[\s\S]*\}/)
+                if (jsonMatch) {
+                    parsed = JSON.parse(jsonMatch[0])
+                } else {
+                    throw new Error("Failed to parse model output as JSON")
+                }
+            }
+        } else {
+            throw new Error("Unexpected OpenAI content type")
+        }
+
+        // Normalize keys: prefer 'summary', but accept 'executive_summary'
+        if (!parsed.summary && parsed.executive_summary) {
+            parsed.summary = parsed.executive_summary
+            delete parsed.executive_summary
+        }
+
+        // Ensure minimal structure
+        parsed.name = parsed.name || name || ""
+        parsed.contact = parsed.contact || contact || {}
+        parsed.skills = Array.isArray(parsed.skills) ? parsed.skills : []
+        parsed.experience = Array.isArray(parsed.experience) ? parsed.experience : []
+        parsed.projects = Array.isArray(parsed.projects) ? parsed.projects : []
+        parsed.education = Array.isArray(parsed.education) ? parsed.education : []
+
+        // If model didn't provide a markdown resume, build a minimal one server-side (deterministic)
+        const buildMarkdownFromJson = (j: any) => {
+            const nameLine = `# ${j.name || "Candidate Name"}\n\n`
+            const contactLine = `${j.contact?.email ? `Email: ${j.contact.email}` : ""
+                }${j.contact?.location ? ` | ${j.contact.location}` : ""}\n\n`
+            const summary = `## Summary\n${j.summary || ""}\n\n`
+            const skills = `## Skills\n${(j.skills || [])
+                .map((s: any) => `- **${s.skill}**: ${s.description || ""}`)
+                .join("\n")}\n\n`
+            const projects = `## Projects\n${(j.projects || [])
+                .map((p: any) => `### ${p.name}\n${p.short_desc || ""}\n${(p.bullets || []).map((b: string) => `- ${b}`).join("\n")}\n`)
+                .join("\n")}\n\n`
+            const experience = `## Experience\n${(j.experience || [])
+                .map((e: any) => `### ${e.role} — ${e.company} (${e.dates || ""})\n${(e.bullets || []).map((b: string) => `- ${b}`).join("\n")}\n`)
+                .join("\n")}\n\n`
+            const education = `## Education\n${(j.education || [])
+                .map((ed: any) => `- ${ed.degree || ""}, ${ed.school || ""} ${ed.year ? `(${ed.year})` : ""}`)
+                .join("\n")}\n\n`
+            return [nameLine, contactLine, summary, skills, experience, projects, education].join("\n")
+        }
+
+        const markdown_resume = parsed.markdown_resume || buildMarkdownFromJson(parsed)
 
         return NextResponse.json({
             status: "success",
-            json_output: result.json_output || result,
-            markdown_resume: result.markdown_resume,
-            generated_at: new Date().toISOString()
+            json_output: parsed,
+            markdown_resume,
+            generated_at: new Date().toISOString(),
+            is_fallback: false
         })
-
     } catch (error: any) {
         console.error("Resume Generation Error:", error)
 
-        // Fallback for quota limits or API errors
-        // We are keeping the fallback logic active for now to ensure output quality even if API fails
-        if (error?.status === 429 || error?.code === 'insufficient_quota' || error?.message?.includes('quota')) {
-            console.log("Returning enhanced fallback resume data due to error:", error.message)
+        // Fallback only for rate limit / quota errors (be conservative)
+        const isQuota =
+            error?.status === 429 ||
+            error?.code === "insufficient_quota" ||
+            (error?.message && String(error.message).toLowerCase().includes("quota"))
 
-            // 1. Smart Summary Generator
-            const primaryLang = detected_languages?.[0] || 'Web';
-            const allLangs = detected_languages?.slice(0, 3).join(', ') || primaryLang;
-            const role = target_role || "Software Engineer";
-            const projectCount = top_repos?.length || 0;
-            const topProjectNames = top_repos?.slice(0, 2).map((r: any) => r.name).join(' and ');
+        if (isQuota) {
+            console.warn("Using controlled fallback due to quota/limit:", error.message || error)
 
-            let fallbackSummary = `Results-driven ${role} specialized in ${allLangs}. `;
+            // Minimal, deterministic fallback that uses provided inputs (no hallucination)
+            const primaryLang = detected_languages?.[0] || "Web"
+            const allLangs = detected_languages?.slice(0, 3).join(", ") || primaryLang
+            const role = target_role || "Software Engineer"
+            const projectCount = (top_repos || []).length
+            const topProjectNames = (top_repos || []).slice(0, 2).map((r: any) => r.name).join(" and ")
+
+            let fallbackSummary = `Results-driven ${role} with experience in ${allLangs}.`
             if (projectCount > 0) {
-                fallbackSummary += `Demonstrated experience building ${projectCount} projects including ${topProjectNames}. `;
-            } else {
-                fallbackSummary += `Proven track record of building scalable applications. `;
+                fallbackSummary += ` Contributed to ${projectCount} GitHub repos${topProjectNames ? ` including ${topProjectNames}` : ""}.`
             }
-            fallbackSummary += `Dedicated to writing clean, maintainable code and contributing to open-source software.`;
-
-            // 2. Smart Skill Descriptions
-            const skillDescriptions: Record<string, string> = {
-                "Kotlin": "Architected type-safe, asynchronous applications using Coroutines and modern JVM patterns.",
-                "TypeScript": "Designed strict, type-safe interfaces and reusable components to ensure codebase scalability.",
-                "JavaScript": "Implemented complex asynchronous logic and dynamic client-side state management.",
-                "HTML": "Structured semantic, accessible (WCAG compliant) markup for optimized SEO and performance.",
-                "CSS": "Created responsive, fluid layouts using modern Flexbox/Grid and CSS variables.",
-                "React": "Built component-driven UIs with efficient state management and lifecycle optimization.",
-                "Node.js": "Developed scalable REST APIs and backend services with a focus on performance.",
-                "Python": "Wrote efficient scripts and automation tools for data processing and system tasks."
-            };
 
             const fallbackSkills = (detected_languages || []).slice(0, 8).map((lang: string) => ({
                 skill: lang,
-                level: "working",
-                description: skillDescriptions[lang] || `Applied ${lang} to build efficient, modular, and testable software solutions.`
+                description: `Experience using ${lang} (derived from repository metadata).`
             }))
 
-            // 3. Smart Project Bullets based on keywords
-            const fallbackProjects = (top_repos || []).slice(0, 5).map((repo: any) => {
-                const name = repo.name.toLowerCase();
-                const techStack = repo.tech?.join(', ') || 'modern technologies';
+            const fallbackProjects = (top_repos || []).slice(0, 5).map((repo: any) => ({
+                name: repo.name,
+                short_desc: repo.short_desc || repo.description || "",
+                tech: repo.tech || [],
+                bullets: [
+                    repo.short_desc ? `Worked on ${repo.name}: ${repo.short_desc}` : `Contributed to ${repo.name}`,
+                    repo.tech ? `Used ${Array.isArray(repo.tech) ? repo.tech.join(", ") : repo.tech}` : ""
+                ].filter(Boolean),
+                url: repo.url || repo.html_url || ""
+            }))
 
-                let bullets = [];
+            const json_output = {
+                name: name || "",
+                contact: contact || {},
+                summary: fallbackSummary,
+                skills: fallbackSkills,
+                projects: fallbackProjects,
+                experience: [],
+                education: [],
+                notes: "Generated via deterministic fallback (no hallucination)."
+            }
 
-                if (repo.short_desc) {
-                    bullets.push(`Developed ${repo.name}, a ${repo.short_desc}.`);
-                } else {
-                    bullets.push(`Engineered core features for ${repo.name}, ensuring high performance and reliability.`);
-                }
+            const fallbackMarkdown = `# ${json_output.name || "Candidate Name"}
 
-                bullets.push(`Leveraged ${techStack} to build a scalable and maintainable solution.`);
+Email: ${json_output.contact?.email || ""} | ${json_output.contact?.location || ""}
 
-                if (name.includes('portfolio') || name.includes('site') || name.includes('web')) {
-                    bullets[1] = "Optimized asset loading and rendering performance, achieving high Lighthouse scores.";
-                } else if (name.includes('api') || name.includes('server') || name.includes('backend')) {
-                    bullets[1] = "Architected scalable API endpoints with secure authentication and efficient data retrieval.";
-                }
-
-                return {
-                    name: repo.name,
-                    short_desc: repo.short_desc || `A ${repo.tech?.[0] || 'software'} engineering project.`,
-                    tech: repo.tech || [],
-                    bullets: bullets,
-                    url: repo.url
-                };
-            })
-
-            const fallbackMarkdown = `
-# ${name || 'Candidate Name'}
-${contact?.email ? `Email: ${contact.email}` : ''} | ${contact?.location ? `Location: ${contact.location}` : ''}
-
-## Executive Summary
-${fallbackSummary}
+## Summary
+${json_output.summary}
 
 ## Skills
-${fallbackSkills.map((s: any) => `- **${s.skill}**: ${s.description}`).join('\n')}
+${json_output.skills.map((s: any) => `- **${s.skill}**: ${s.description}`).join("\n")}
 
 ## Projects
-${fallbackProjects.map((p: any) => `
-### ${p.name}
-${p.short_desc}
-${p.bullets.map((b: string) => `- ${b}`).join('\n')}
-`).join('\n')}
-            `.trim()
+${json_output.projects
+                    .map((p: any) => `### ${p.name}\n${p.short_desc}\n${(p.bullets || []).map((b: string) => `- ${b}`).join("\n")}\n`)
+                    .join("\n")}`
 
             return NextResponse.json({
                 status: "success",
-                json_output: {
-                    name: name || "",
-                    contact: contact || {},
-                    executive_summary: fallbackSummary,
-                    skills: fallbackSkills,
-                    projects: fallbackProjects,
-                    notes: "Generated via enhanced fallback logic."
-                },
+                json_output,
                 markdown_resume: fallbackMarkdown,
                 generated_at: new Date().toISOString(),
                 is_fallback: true
             })
         }
 
-        return NextResponse.json({
-            error: "Failed to generate resume",
-            details: error.message || String(error)
-        }, { status: 500 })
+        // For other errors return helpful diagnostics
+        return NextResponse.json(
+            {
+                error: "Failed to generate resume",
+                details: error?.message || String(error)
+            },
+            { status: 500 }
+        )
     }
 }
