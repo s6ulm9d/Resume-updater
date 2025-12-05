@@ -1,37 +1,24 @@
 // src/app/api/github/route.ts
 import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
-import GithubProvider from "next-auth/providers/github"
-import NextAuth from "next-auth"
-import { authOptions } from "@/lib/authOptions" // optional: if you centralize NextAuth config
-// NOTE: If you don't use getServerSession here, you may accept a token from the client (bearer), but server-side session is more secure.
+import { authOptions } from "@/lib/authOptions"
 
 export async function GET(req: Request) {
     try {
-        // Expect an Authorization header with a personal access token OR rely on session cookie (recommended)
-        const authHeader = req.headers.get("authorization")
-        let token = null
+        const session = await getServerSession(authOptions)
+        let token = session?.accessToken as string | undefined
 
-        if (authHeader && authHeader.startsWith("Bearer ")) {
-            token = authHeader.replace("Bearer ", "")
-        } else {
-            // Optionally attempt to read session (requires getServerSession config)
-            // If you don't have getServerSession set up for edge functions, skip this block and require token client-side.
-            try {
-                // WARNING: getServerSession in App Router requires some setup; keep this optional
-                // const session = await getServerSession(authOptions)
-                // token = session?.accessToken
-            } catch (e) {
-                // ignore
-            }
+        if (!token) {
+            // only accept token from header when explicitly provided by trusted clients
+            const header = req.headers.get("authorization")
+            if (header?.startsWith("Bearer ")) token = header.split(" ")[1]
         }
 
         if (!token) {
-            return NextResponse.json({ error: "Missing GitHub access token" }, { status: 401 })
+            return NextResponse.json({ error: "Authentication required" }, { status: 401 })
         }
 
         const url = new URL(req.url)
-        const usernameParam = url.searchParams.get("username") || ""
         const per_page = url.searchParams.get("per_page") || "100"
 
         // Fetch user's repos
@@ -45,7 +32,7 @@ export async function GET(req: Request) {
         if (!res.ok) {
             const txt = await res.text()
             console.error("GitHub API error:", res.status, txt)
-            return NextResponse.json({ error: "Failed to fetch from GitHub", details: txt }, { status: res.status })
+            return NextResponse.json({ error: "Failed to fetch from GitHub" }, { status: res.status })
         }
 
         const repos = await res.json()
@@ -65,8 +52,8 @@ export async function GET(req: Request) {
         }))
 
         return NextResponse.json({ status: "success", repos: mapped })
-    } catch (error: any) {
+    } catch (error) {
         console.error("github.route error:", error)
-        return NextResponse.json({ error: "Failed to fetch GitHub data", details: error?.message || String(error) }, { status: 500 })
+        return NextResponse.json({ error: "Failed to fetch GitHub data" }, { status: 500 })
     }
 }

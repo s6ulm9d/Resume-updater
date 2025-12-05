@@ -1,8 +1,20 @@
 import { NextResponse } from "next/server"
 import OpenAI from "openai"
+import { z } from "zod"
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
+})
+
+const ResumeRequestSchema = z.object({
+    name: z.string().optional(),
+    contact: z.any().optional(),
+    existing_resume_text: z.string().optional().default(""),
+    detected_languages: z.array(z.string()).optional().default([]),
+    top_repos: z.array(z.any()).optional().default([]),
+    repo_count: z.number().optional().default(0),
+    target_role: z.string().min(1, "Target role is required"),
+    tone: z.string().optional().default("professional"),
 })
 
 export async function POST(req: Request) {
@@ -17,20 +29,32 @@ export async function POST(req: Request) {
 
     try {
         if (!process.env.OPENAI_API_KEY) {
-            throw new Error("OPENAI_API_KEY is not defined in environment variables")
+            console.error("OPENAI_API_KEY is not defined")
+            return NextResponse.json({ error: "Server configuration error" }, { status: 500 })
         }
 
-        const body = await req.json()
-            ; ({
-                name = "",
-                contact = {},
-                existing_resume_text = "",
-                detected_languages =[],
-                top_repos =[],
-                repo_count = 0,
-                target_role = "",
-                tone = ""
-            } = body)
+        const raw = await req.text().catch(() => "")
+        let body: any = {}
+        try {
+            body = raw ? JSON.parse(raw) : {}
+        } catch (_) {
+            return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+        }
+
+        const parsed = ResumeRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return NextResponse.json({ error: "Invalid request body", issues: parsed.error.format() }, { status: 400 })
+        }
+
+        // Assign parsed data to variables
+        name = parsed.data.name || ""
+        contact = parsed.data.contact || {}
+        existing_resume_text = parsed.data.existing_resume_text
+        detected_languages = parsed.data.detected_languages
+        top_repos = parsed.data.top_repos
+        repo_count = parsed.data.repo_count
+        target_role = parsed.data.target_role
+        tone = parsed.data.tone
 
         // DEBUG - ensure inputs are present
         console.debug("[resume.generate] inputs:", {
@@ -38,16 +62,11 @@ export async function POST(req: Request) {
             contact,
             existing_resume_length: existing_resume_text?.length ?? 0,
             detected_languages,
-            top_repos_count: Array.isArray(top_repos) ? top_repos.length : typeof top_repos,
+            top_repos_count: top_repos.length,
             repo_count,
             target_role,
             tone
         })
-
-        // Basic validation
-        if (!Array.isArray(top_repos)) {
-            return NextResponse.json({ error: "Invalid payload: top_repos must be array" }, { status: 400 })
-        }
 
         // Build GitHub summary object for prompt
         const githubData = {
@@ -113,17 +132,17 @@ Target role: ${target_role || ""}
         if (!rawContent) throw new Error("No content received from OpenAI")
 
         // content may already be an object (when response_format used) or a JSON string
-        let parsed: any = null
+        let parsedContent: any = null
         if (typeof rawContent === "object") {
-            parsed = rawContent
+            parsedContent = rawContent
         } else if (typeof rawContent === "string") {
             try {
-                parsed = JSON.parse(rawContent)
+                parsedContent = JSON.parse(rawContent)
             } catch (e) {
                 // Some models return JSON inside markdown; try to extract the JSON block
                 const jsonMatch = rawContent.match(/\{[\s\S]*\}/)
                 if (jsonMatch) {
-                    parsed = JSON.parse(jsonMatch[0])
+                    parsedContent = JSON.parse(jsonMatch[0])
                 } else {
                     throw new Error("Failed to parse model output as JSON")
                 }
@@ -133,18 +152,18 @@ Target role: ${target_role || ""}
         }
 
         // Normalize keys: prefer 'summary', but accept 'executive_summary'
-        if (!parsed.summary && parsed.executive_summary) {
-            parsed.summary = parsed.executive_summary
-            delete parsed.executive_summary
+        if (!parsedContent.summary && parsedContent.executive_summary) {
+            parsedContent.summary = parsedContent.executive_summary
+            delete parsedContent.executive_summary
         }
 
         // Ensure minimal structure
-        parsed.name = parsed.name || name || ""
-        parsed.contact = parsed.contact || contact || {}
-        parsed.skills = Array.isArray(parsed.skills) ? parsed.skills : []
-        parsed.experience = Array.isArray(parsed.experience) ? parsed.experience : []
-        parsed.projects = Array.isArray(parsed.projects) ? parsed.projects : []
-        parsed.education = Array.isArray(parsed.education) ? parsed.education : []
+        parsedContent.name = parsedContent.name || name || ""
+        parsedContent.contact = parsedContent.contact || contact || {}
+        parsedContent.skills = Array.isArray(parsedContent.skills) ? parsedContent.skills : []
+        parsedContent.experience = Array.isArray(parsedContent.experience) ? parsedContent.experience : []
+        parsedContent.projects = Array.isArray(parsedContent.projects) ? parsedContent.projects : []
+        parsedContent.education = Array.isArray(parsedContent.education) ? parsedContent.education : []
 
         // If model didn't provide a markdown resume, build a minimal one server-side (deterministic)
         const buildMarkdownFromJson = (j: any) => {
@@ -167,26 +186,27 @@ Target role: ${target_role || ""}
             return [nameLine, contactLine, summary, skills, experience, projects, education].join("\n")
         }
 
-        const markdown_resume = parsed.markdown_resume || buildMarkdownFromJson(parsed)
+        const markdown_resume = parsedContent.markdown_resume || buildMarkdownFromJson(parsedContent)
 
         return NextResponse.json({
             status: "success",
-            json_output: parsed,
+            json_output: parsedContent,
             markdown_resume,
             generated_at: new Date().toISOString(),
             is_fallback: false
         })
-    } catch (error: any) {
+    } catch (error) {
         console.error("Resume Generation Error:", error)
 
         // Fallback only for rate limit / quota errors (be conservative)
+        const err = error as any
         const isQuota =
-            error?.status === 429 ||
-            error?.code === "insufficient_quota" ||
-            (error?.message && String(error.message).toLowerCase().includes("quota"))
+            err?.status === 429 ||
+            err?.code === "insufficient_quota" ||
+            (err?.message && String(err.message).toLowerCase().includes("quota"))
 
         if (isQuota) {
-            console.warn("Using controlled fallback due to quota/limit:", error.message || error)
+            console.warn("Using controlled fallback due to quota/limit:", err.message || err)
 
             // Minimal, deterministic fallback that uses provided inputs (no hallucination)
             const primaryLang = detected_languages?.[0] || "Web"
@@ -254,8 +274,7 @@ ${json_output.projects
         // For other errors return helpful diagnostics
         return NextResponse.json(
             {
-                error: "Failed to generate resume",
-                details: error?.message || String(error)
+                error: "Failed to generate resume"
             },
             { status: 500 }
         )
